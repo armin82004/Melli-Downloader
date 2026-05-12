@@ -1,219 +1,49 @@
-name: Full Website Mirror with Puppeteer
+name: Archive Website Offline
 
 on:
   workflow_dispatch:
     inputs:
-      site_url:
-        description: 'Website URL'
+      target_url:
+        description: "Website URL to archive"
         required: true
-        type: string
-        default: 'https://example.com'
-
-permissions:
-  contents: write
+      output_dir:
+        description: "Output directory"
+        default: "archived"
 
 jobs:
-  mirror:
+  archive:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '20'
-      
-      - name: Install Puppeteer
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
-          npm install puppeteer
-          npx puppeteer browsers install chrome
-      
-      - name: Create download script
+          pip install playwright
+          playwright install chromium
+
+      - name: Download full website
         run: |
-          cat > download.js << 'EOF'
-          const puppeteer = require('puppeteer');
-          const fs = require('fs');
-          const path = require('path');
-          const https = require('https');
-          const http = require('http');
-          const { URL } = require('url');
-          
-          const siteUrl = process.env.SITE_URL;
-          const outputDir = './mirror';
-          
-          if (!siteUrl) {
-            console.error('SITE_URL not set');
-            process.exit(1);
-          }
-          
-          const domain = new URL(siteUrl).hostname;
-          console.log(`Starting mirror of: ${siteUrl}`);
-          
-          if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
-          }
-          
-          const visited = new Set();
-          const queue = [siteUrl];
-          
-          function getFilePath(url) {
-            const urlObj = new URL(url);
-            let pathname = urlObj.pathname;
-            
-            if (pathname === '' || pathname === '/') {
-              pathname = '/index.html';
-            } else if (!pathname.includes('.')) {
-              if (pathname.endsWith('/')) {
-                pathname += 'index.html';
-              } else {
-                pathname += '/index.html';
-              }
-            }
-            
-            return path.join(outputDir, domain, pathname);
-          }
-          
-          async function downloadResource(url, filePath) {
-            const protocol = url.startsWith('https') ? https : http;
-            const dir = path.dirname(filePath);
-            
-            if (!fs.existsSync(dir)) {
-              fs.mkdirSync(dir, { recursive: true });
-            }
-            
-            return new Promise((resolve) => {
-              const request = protocol.get(url, { timeout: 30000 }, (response) => {
-                if (response.statusCode !== 200) {
-                  resolve(false);
-                  return;
-                }
-                
-                const file = fs.createWriteStream(filePath);
-                response.pipe(file);
-                file.on('finish', () => { file.close(); resolve(true); });
-              });
-              request.on('error', () => resolve(false));
-              request.setTimeout(30000, () => { request.destroy(); resolve(false); });
-            });
-          }
-          
-          async function getPageLinks(page, baseUrl) {
-            return await page.evaluate((base) => {
-              const links = new Set();
-              document.querySelectorAll('a[href]').forEach(el => {
-                let href = el.getAttribute('href');
-                if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) return;
-                try {
-                  const absolute = new URL(href, base).href;
-                  if (new URL(absolute).hostname === new URL(base).hostname) {
-                    links.add(absolute.split('#')[0]);
-                  }
-                } catch(e) {}
-              });
-              return Array.from(links);
-            }, baseUrl);
-          }
-          
-          async function getAllResources(page) {
-            return await page.evaluate(() => {
-              const resources = [];
-              document.querySelectorAll('link[rel="stylesheet"]').forEach(l => { if(l.href) resources.push(l.href); });
-              document.querySelectorAll('script[src]').forEach(s => { if(s.src) resources.push(s.src); });
-              document.querySelectorAll('img[src]').forEach(i => { if(i.src) resources.push(i.src); });
-              return resources;
-            });
-          }
-          
-          async function main() {
-            const browser = await puppeteer.launch({
-              headless: true,
-              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-            });
-            
-            const page = await browser.newPage();
-            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-            
-            let pageCount = 0;
-            
-            while (queue.length > 0 && pageCount < 500) {
-              const currentUrl = queue.shift();
-              if (visited.has(currentUrl)) continue;
-              visited.add(currentUrl);
-              
-              console.log(`Processing (${visited.size}/${queue.length}): ${currentUrl}`);
-              
-              try {
-                await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-                await page.waitForTimeout(3000);
-                
-                const filePath = getFilePath(currentUrl);
-                const dir = path.dirname(filePath);
-                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-                
-                const html = await page.content();
-                fs.writeFileSync(filePath, html);
-                
-                const resources = await getAllResources(page);
-                for (const resource of resources) {
-                  const resourcePath = getFilePath(resource);
-                  await downloadResource(resource, resourcePath);
-                }
-                
-                const links = await getPageLinks(page, currentUrl);
-                for (const link of links) {
-                  if (!visited.has(link) && !queue.includes(link)) queue.push(link);
-                }
-                
-                pageCount++;
-              } catch (err) {
-                console.log(`Error: ${err.message}`);
-              }
-              
-              await page.waitForTimeout(1000);
-            }
-            
-            await browser.close();
-            console.log(`\nDone! Pages saved: ${visited.size}`);
-          }
-          
-          main().catch(console.error);
-          EOF
-      
-      - name: Run download
-        env:
-          SITE_URL: ${{ github.event.inputs.site_url }}
-        run: node download.js || true
-      
-      - name: Create 95MB ZIP parts and push
+          python scripts/download_site.py \
+            "${{ github.event.inputs.target_url }}" \
+            "${{ github.event.inputs.output_dir }}"
+
+      - name: Compress and split to 95MB chunks
         run: |
-          sudo apt-get install -y zip
-          
-          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
-          ZIP_NAME="mirror_${DOMAIN}_${TIMESTAMP}"
-          
-          if [ -d "./mirror" ]; then
-            cd mirror
-            zip -r -s 95m "../${ZIP_NAME}.zip" ./
-            cd ..
-            
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            
-            git add ${ZIP_NAME}.zip* 2>/dev/null || true
-            git commit -m "Add full mirror of ${{ github.event.inputs.site_url }}" 2>/dev/null || true
-            git push origin main
-            
-            echo ""
-            echo "========================================="
-            echo "✅ SUCCESS"
-            echo "========================================="
-            echo "📦 File: ${ZIP_NAME}.zip"
-            echo "📁 Parts: ${ZIP_NAME}.z01, ${ZIP_NAME}.z02, ..."
-            echo "📍 Pushed to: ${{ github.repository }}"
-            echo "========================================="
-          else
-            echo "❌ Mirror directory not found!"
-          fi
+          cd ${{ github.event.inputs.output_dir }}
+          tar -czf site.tar.gz .
+          split -b 95m site.tar.gz site.tar.gz.part-
+
+      - name: Commit and push results
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Archive site: ${{ github.event.inputs.target_url }}"
+          git push

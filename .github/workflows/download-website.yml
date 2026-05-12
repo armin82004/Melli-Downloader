@@ -1,206 +1,32 @@
-name: دانلود سایت و Push به ریپو
+name: Download Site
 
 on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: 'آدرس کامل سایت (مثال: https://example.com یا https://www.typescriptlang.org)'
+        description: 'Website URL'
         required: true
         type: string
-        default: 'https://www.typescriptlang.org'
-      part_size:
-        description: 'حجم هر پارت (مثال: 95m, 50m, 100m)'
-        required: false
-        type: string
-        default: '95m'
-      max_depth:
-        description: 'عمق دانلود (پیشفرض: inf برای کل سایت)'
-        required: false
-        type: string
-        default: 'inf'
-
-permissions:
-  contents: write
 
 jobs:
-  mirror-and-push:
+  download:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download website from user input
+      - uses: actions/checkout@v4
+      
+      - name: Download
         run: |
-          SITE="${{ github.event.inputs.site_url }}"
-          PART_SIZE="${{ github.event.inputs.part_size }}"
-          MAX_DEPTH="${{ github.event.inputs.max_depth }}"
-          
-          DOMAIN=$(echo "$SITE" | sed 's|https\?://||' | cut -d'/' -f1)
-          
-          echo "========================================="
-          echo "آدرس وارد شده: $SITE"
-          echo "دامنه: $DOMAIN"
-          echo "حجم هر پارت: $PART_SIZE"
-          echo "عمق دانلود: $MAX_DEPTH"
-          echo "========================================="
-          
-          wget \
-            --recursive \
-            --level=$MAX_DEPTH \
-            --convert-links \
-            --adjust-extension \
-            --page-requisites \
-            --no-parent \
-            --wait=2 \
-            --random-wait \
-            --limit-rate=500k \
-            --no-clobber \
-            --continue \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            --execute robots=off \
-            "$SITE" || true
-          
-          echo "✅ دانلود کامل شد"
-          
-          DOWNLOAD_DIR=$(find . -maxdepth 2 -type d \( -name "$DOMAIN" -o -name "www.$DOMAIN" -o -name "*.$DOMAIN" \) 2>/dev/null | head -1)
-          
-          if [ -z "$DOWNLOAD_DIR" ]; then
-            DOWNLOAD_DIR=$(find . -maxdepth 1 -type d ! -name "." ! -name ".git" ! -name ".github" 2>/dev/null | head -1)
-          fi
-          
-          echo "download_dir=$DOWNLOAD_DIR" >> $GITHUB_ENV
-          echo "domain=$DOMAIN" >> $GITHUB_ENV
-          echo "part_size=$PART_SIZE" >> $GITHUB_ENV
-
-      - name: Show download statistics
+          wget -r -k -p -E -np -e robots=off "${{ github.event.inputs.site_url }}" || true
+      
+      - name: Zip
         run: |
-          if [ -d "${{ env.download_dir }}" ]; then
-            FILE_COUNT=$(find "${{ env.download_dir }}" -type f | wc -l)
-            TOTAL_SIZE=$(du -sh "${{ env.download_dir }}" | cut -f1)
-            
-            echo "========================================="
-            echo "آمار دانلود"
-            echo "========================================="
-            echo "📁 پوشه: ${{ env.download_dir }}"
-            echo "📄 تعداد فایل‌ها: $FILE_COUNT"
-            echo "💾 حجم کل: $TOTAL_SIZE"
-          else
-            echo "⚠️ پوشه دانلود پیدا نشد"
-            echo "لیست فایل‌های موجود:"
-            ls -la
-          fi
-
-      - name: Create ZIP archives
-        run: |
-          echo "========================================="
-          echo "ساخت فایل ZIP با پارت‌های ${{ env.part_size }}"
-          echo "========================================="
-          
-          DOWNLOAD_DIR="${{ env.download_dir }}"
-          DOMAIN="${{ env.domain }}"
-          
-          if [ -z "$DOWNLOAD_DIR" ] || [ ! -d "$DOWNLOAD_DIR" ]; then
-            echo "❌ پوشه دانلود یافت نشد!"
-            exit 0
-          fi
-          
-          sudo apt-get update
           sudo apt-get install -y zip
-          
-          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          OUTPUT_NAME="mirror_${DOMAIN}_${TIMESTAMP}"
-          
-          cd "$DOWNLOAD_DIR"
-          
-          zip -r -s "${{ env.part_size }}" "../${OUTPUT_NAME}.zip" ./
-          
-          cd ..
-          
-          echo "✅ فایل‌های ZIP ساخته شدند:"
-          ls -lh ${OUTPUT_NAME}.zip* 2>/dev/null
-          
-          echo "output_name=${OUTPUT_NAME}" >> $GITHUB_ENV
-
-      - name: Move files to release folder
+          zip -r -s 95m backup.zip ./
+      
+      - name: Push
         run: |
-          mkdir -p "releases/${{ env.output_name }}"
-          
-          mv ${{ env.output_name }}.zip* releases/${{ env.output_name }}/ 2>/dev/null || true
-          
-          cat > "releases/${{ env.output_name }}/info.txt" << EOF
-========================================
-اطلاعات آرشیو
-========================================
-سایت: ${{ github.event.inputs.site_url }}
-تاریخ دانلود: $(date '+%Y-%m-%d %H:%M:%S')
-حجم هر پارت: ${{ env.part_size }}
-نام آرشیو: ${{ env.output_name }}
-========================================
-
-نحوه استفاده:
-1. تمام فایل‌های zip و z01, z02, ... را دانلود کنید
-2. در یک پوشه قرار دهید
-3. فایل اصلی zip را Extract کنید
-4. فایل index.html را در مرورگر باز کنید
-EOF
-          
-          cat > "releases/${{ env.output_name }}/README.md" << 'EOF'
-# آرشیو کامل سایت
-
-این آرشیو توسط GitHub Actions ساخته شده است.
-
-## فایل‌ها:
-- فایل‌های با پسوند `.zip` و `.z01`، `.z02` و ... را دانلود کنید
-- همه فایل‌ها را در یک پوشه قرار دهید
-- فایل اصلی `.zip` را Extract کنید
-
-## مشاهده آفلاین:
-بعد از Extract، فایل `index.html` را در مرورگر باز کنید.
-
----
-تاریخ ایجاد: $(date '+%Y-%m-%d')
-EOF
-
-      - name: Commit and push to repository
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add releases/
-          
-          if git diff --cached --quiet; then
-            echo "هیچ تغییر جدیدی برای push وجود ندارد"
-          else
-            git commit -m "Add mirror for ${{ github.event.inputs.site_url }} - $(date +'%Y-%m-%d %H:%M:%S')"
-            git push origin main
-            echo "✅ فایل‌ها با موفقیت به ریپو push شدند"
-          fi
-
-      - name: Create tag
-        run: |
-          TAG_NAME="mirror-$(date +%Y%m%d-%H%M%S)"
-          git tag "$TAG_NAME"
-          git push origin "$TAG_NAME"
-          echo "✅ تگ ایجاد شد: $TAG_NAME"
-
-      - name: Final report
-        run: |
-          echo ""
-          echo "========================================="
-          echo "            عملیات با موفقیت انجام شد"
-          echo "========================================="
-          echo ""
-          echo "🔗 آدرس وارد شده: ${{ github.event.inputs.site_url }}"
-          echo "📁 مسیر فایل‌ها در ریپو:"
-          echo "   https://github.com/${{ github.repository }}/tree/main/releases/${{ env.output_name }}"
-          echo ""
-          echo "🏷️ تگ ایجاد شده:"
-          echo "   https://github.com/${{ github.repository }}/releases/tag/$(git tag | tail -1)"
-          echo ""
-          echo "📦 برای دانلود فایل‌ها:"
-          echo "   1. به ریپوی گیت‌هاب بروید"
-          echo "   2. به پوشه releases/${{ env.output_name }} بروید"
-          echo "   3. فایل‌های ZIP را دانلود کنید"
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add backup.zip*
+          git commit -m "Add website backup" || true
+          git push

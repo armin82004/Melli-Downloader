@@ -1,4 +1,4 @@
-name: Download Site
+name: Full Mirror with HTTrack + Puppeteer
 
 on:
   workflow_dispatch:
@@ -9,47 +9,70 @@ on:
         type: string
 
 jobs:
-  download:
+  full-mirror:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       
-      - name: Download
-        run: |
-          wget \
-            -r \
-            -l inf \
-            -k \
-            -p \
-            -E \
-            -np \
-            --wait=2 \
-            --random-wait \
-            --tries=3 \
-            --timeout=30 \
-            --no-clobber \
-            --continue \
-            --ignore-length \
-            --retry-connrefused \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            --execute robots=off \
-            --reject="*.tmp,*.log" \
-            "${{ github.event.inputs.site_url }}" \
-            2>&1 | grep -v "ERROR 404" | grep -v "ERROR 403" | grep -v "ERROR 401" || true
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       
-      - name: Zip
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y httrack
+          npm install -g puppeteer
+      
+      - name: First pass - Get page structure
+        run: |
+          httrack "${{ github.event.inputs.site_url }}" -O "./mirror" --depth=2 --robots=0 || true
+      
+      - name: Second pass - Render JavaScript pages
+        run: |
+          node << 'EOF'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
+          
+          (async () => {
+            const browser = await puppeteer.launch({ headless: "new" });
+            const page = await browser.newPage();
+            
+            // پیدا کردن و رندر کردن صفحات HTML
+            const findAndRender = async (dir) => {
+              const files = fs.readdirSync(dir);
+              for (const file of files) {
+                const fullPath = path.join(dir, file);
+                if (fs.statSync(fullPath).isDirectory()) {
+                  await findAndRender(fullPath);
+                } else if (file.endsWith('.html')) {
+                  console.log(`Rendering: ${fullPath}`);
+                  await page.goto(`file://${fullPath}`, { waitUntil: 'networkidle2' });
+                  await page.waitForTimeout(3000);
+                  const content = await page.content();
+                  fs.writeFileSync(fullPath, content);
+                }
+              }
+            };
+            
+            await findAndRender('./mirror');
+            await browser.close();
+          })();
+          EOF
+      
+      - name: Compress and Upload
         run: |
           sudo apt-get install -y zip
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
           DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
           ZIP_NAME="backup_${DOMAIN}_${TIMESTAMP}"
-          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          zip -r -s 95m "${ZIP_NAME}.zip" ./ || true
-      
-      - name: Push
-        run: |
-          git config user.name "bot"
-          git config user.email "bot@users.noreply.github.com"
+          
+          zip -r -s 95m "${ZIP_NAME}.zip" ./mirror/
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${ZIP_NAME}.zip* 2>/dev/null || true
-          git commit -m "Add website backup ${ZIP_NAME}" 2>/dev/null || true
+          git commit -m "Add full mirror with JS rendering" 2>/dev/null || true
           git push

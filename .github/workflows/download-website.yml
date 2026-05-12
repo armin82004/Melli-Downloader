@@ -1,4 +1,4 @@
-name: Download React Site
+name: Download Site with HTTrack
 
 on:
   workflow_dispatch:
@@ -8,29 +8,53 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+
 jobs:
-  download:
+  mirror:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Install HTTrack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y httrack
       
-      - name: Install SingleFile
-        run: npm install -g single-file-cli
-      
-      - name: Download with SingleFile
+      - name: Mirror website with HTTrack
         run: |
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
           DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
+          ZIP_NAME="backup_${DOMAIN}_${TIMESTAMP}"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           
-          single-file "${{ github.event.inputs.site_url }}" "./${DOMAIN}_${TIMESTAMP}.html"
+          httrack "${{ github.event.inputs.site_url }}" \
+            -O "./mirror" \
+            --depth=10 \
+            --mirror \
+            --robots=0 \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --keep-links \
+            --can-go-up-and-down \
+            --extended \
+            --timeout=30 \
+            --retry=5 \
+            --max-rate=500000 \
+            --verbose || true
+      
+      - name: Compress and upload
+        run: |
+          sudo apt-get install -y zip
           
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.html 2>/dev/null || true
-          git commit -m "Add React page backup" 2>/dev/null || true
-          git push
+          if [ -d "./mirror" ]; then
+            zip -r -s 95m "${ZIP_NAME}.zip" ./mirror/
+            
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add ${ZIP_NAME}.zip* 2>/dev/null || true
+            git commit -m "Add HTTrack mirror ${ZIP_NAME}" 2>/dev/null || true
+            git push
+          else
+            echo "Mirror directory not found!"
+          fi

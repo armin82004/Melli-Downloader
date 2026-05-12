@@ -1,0 +1,71 @@
+name: Download Website
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: 'Website URL'
+        required: true
+        type: string
+        default: 'https://www.typescriptlang.org'
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download with wget
+        run: |
+          echo "Starting download of: ${{ github.event.inputs.site_url }}"
+          wget --recursive --level=inf --convert-links --adjust-extension \
+               --page-requisites --no-parent --wait=1 --random-wait \
+               --user-agent="Mozilla/5.0" --execute robots=off \
+               "${{ github.event.inputs.site_url }}" 2>&1 | tee download.log
+          echo "Download completed"
+      
+      - name: List downloaded files
+        run: |
+          echo "=== Downloaded files ==="
+          find . -type f -name "*.html" | head -20
+          echo "Total size: $(du -sh . | cut -f1)"
+      
+      - name: Create ZIP parts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+          
+          DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||')
+          ZIP_NAME="backup_${DOMAIN}_$(date +%Y%m%d_%H%M%S)"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          
+          # پیدا کردن پوشه دانلود
+          DOWNLOAD_DIR=$(find . -maxdepth 1 -type d -name "www.*" -o -name "*.com" -o -name "*.org" | head -1)
+          
+          if [ -n "$DOWNLOAD_DIR" ]; then
+            cd "$DOWNLOAD_DIR"
+            zip -r -s 95m "../${ZIP_NAME}.zip" ./
+            cd ..
+          else
+            zip -r -s 95m "${ZIP_NAME}.zip" ./
+          fi
+          
+          ls -lh ${ZIP_NAME}.zip*
+      
+      - name: Push to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${ZIP_NAME}.zip* download.log 2>/dev/null || true
+          git commit -m "Backup of ${{ github.event.inputs.site_url }}" 2>/dev/null || true
+          git push origin main
+      
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-log
+          path: download.log
+          retention-days: 7

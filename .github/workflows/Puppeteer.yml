@@ -1,0 +1,304 @@
+name: Full Website Mirror with Puppeteer
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: 'Website URL'
+        required: true
+        type: string
+        default: 'https://www.typescriptlang.org'
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Puppeteer
+        run: |
+          npm install puppeteer
+          npx puppeteer browsers install chrome
+      
+      - name: Create download script with logging
+        run: |
+          cat > download.js << 'EOF'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
+          const https = require('https');
+          const http = require('http');
+          const { URL } = require('url');
+          
+          const siteUrl = process.env.SITE_URL;
+          const outputDir = './mirror';
+          const logFile = './download_log.txt';
+          
+          function log(message, type = 'INFO') {
+            const timestamp = new Date().toISOString();
+            const logLine = `[${timestamp}] [${type}] ${message}`;
+            console.log(logLine);
+            fs.appendFileSync(logFile, logLine + '\n');
+          }
+          
+          if (!siteUrl) {
+            log('SITE_URL not set', 'ERROR');
+            process.exit(1);
+          }
+          
+          const domain = new URL(siteUrl).hostname;
+          log(`Starting mirror of: ${siteUrl}`);
+          log(`Domain: ${domain}`);
+          log(`Output directory: ${outputDir}`);
+          
+          if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+          }
+          
+          const visited = new Set();
+          const queue = [siteUrl];
+          let totalResources = 0;
+          let totalPages = 0;
+          
+          function getFilePath(url) {
+            const urlObj = new URL(url);
+            let pathname = urlObj.pathname;
+            
+            if (pathname === '' || pathname === '/') {
+              pathname = '/index.html';
+            } else if (!pathname.includes('.')) {
+              if (pathname.endsWith('/')) {
+                pathname += 'index.html';
+              } else {
+                pathname += '/index.html';
+              }
+            }
+            
+            return path.join(outputDir, domain, pathname);
+          }
+          
+          async function downloadResource(url, filePath, type) {
+            const protocol = url.startsWith('https') ? https : http;
+            const dir = path.dirname(filePath);
+            
+            if (!fs.existsSync(dir)) {
+              fs.mkdirSync(dir, { recursive: true });
+            }
+            
+            return new Promise((resolve) => {
+              const request = protocol.get(url, { timeout: 30000 }, (response) => {
+                if (response.statusCode !== 200) {
+                  log(`❌ FAILED ${type}: ${url} (Status: ${response.statusCode})`, 'WARN');
+                  resolve(false);
+                  return;
+                }
+                
+                const file = fs.createWriteStream(filePath);
+                response.pipe(file);
+                
+                let size = 0;
+                response.on('data', (chunk) => { size += chunk.length; });
+                
+                file.on('finish', () => {
+                  file.close();
+                  totalResources++;
+                  log(`✅ DOWNLOADED ${type}: ${url} (${(size/1024).toFixed(2)} KB)`, 'SUCCESS');
+                  resolve(true);
+                });
+              });
+              
+              request.on('error', (err) => {
+                log(`❌ ERROR ${type}: ${url} - ${err.message}`, 'ERROR');
+                resolve(false);
+              });
+              
+              request.setTimeout(30000, () => {
+                request.destroy();
+                log(`❌ TIMEOUT ${type}: ${url}`, 'WARN');
+                resolve(false);
+              });
+            });
+          }
+          
+          async function getPageLinks(page, baseUrl) {
+            log(`Extracting links from: ${baseUrl}`, 'INFO');
+            return await page.evaluate((base) => {
+              const links = new Set();
+              document.querySelectorAll('a[href]').forEach(el => {
+                let href = el.getAttribute('href');
+                if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) return;
+                try {
+                  const absolute = new URL(href, base).href;
+                  if (new URL(absolute).hostname === new URL(base).hostname) {
+                    links.add(absolute.split('#')[0]);
+                  }
+                } catch(e) {}
+              });
+              return Array.from(links);
+            }, baseUrl);
+          }
+          
+          async function getAllResources(page) {
+            return await page.evaluate(() => {
+              const resources = [];
+              document.querySelectorAll('link[rel="stylesheet"]').forEach(l => { if(l.href) resources.push({url: l.href, type: 'CSS'}); });
+              document.querySelectorAll('script[src]').forEach(s => { if(s.src) resources.push({url: s.src, type: 'JS'}); });
+              document.querySelectorAll('img[src]').forEach(i => { if(i.src) resources.push({url: i.src, type: 'IMAGE'}); });
+              return resources;
+            });
+          }
+          
+          async function main() {
+            log('Launching browser...', 'INFO');
+            const browser = await puppeteer.launch({
+              headless: true,
+              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            });
+            
+            const page = await browser.newPage();
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+            
+            log('Browser launched successfully', 'SUCCESS');
+            
+            let pageCount = 0;
+            const startTime = Date.now();
+            
+            while (queue.length > 0 && pageCount < 500) {
+              const currentUrl = queue.shift();
+              if (visited.has(currentUrl)) continue;
+              visited.add(currentUrl);
+              
+              pageCount++;
+              const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+              log(`[${pageCount}/${queue.length}] Processing: ${currentUrl} (Elapsed: ${elapsed}s)`, 'INFO');
+              
+              try {
+                await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+                log(`✅ RENDERED: ${currentUrl}`, 'SUCCESS');
+                
+                await page.waitForTimeout(3000);
+                
+                const filePath = getFilePath(currentUrl);
+                const dir = path.dirname(filePath);
+                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                
+                const html = await page.content();
+                const htmlSize = (html.length / 1024).toFixed(2);
+                fs.writeFileSync(filePath, html);
+                log(`💾 SAVED HTML: ${filePath} (${htmlSize} KB)`, 'SUCCESS');
+                
+                const resources = await getAllResources(page);
+                log(`🔍 Found ${resources.length} resources on ${currentUrl}`, 'INFO');
+                
+                for (const resource of resources) {
+                  const resourcePath = getFilePath(resource.url);
+                  await downloadResource(resource.url, resourcePath, resource.type);
+                }
+                
+                const links = await getPageLinks(page, currentUrl);
+                log(`🔗 Found ${links.length} internal links on ${currentUrl}`, 'INFO');
+                
+                let newLinks = 0;
+                for (const link of links) {
+                  if (!visited.has(link) && !queue.includes(link)) {
+                    queue.push(link);
+                    newLinks++;
+                  }
+                }
+                log(`➕ Added ${newLinks} new links to queue (Total queue: ${queue.length})`, 'INFO');
+                
+                totalPages++;
+                
+              } catch (err) {
+                log(`❌ ERROR processing ${currentUrl}: ${err.message}`, 'ERROR');
+              }
+              
+              await page.waitForTimeout(1000);
+            }
+            
+            await browser.close();
+            
+            const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+            log('========================================', 'INFO');
+            log('MIRROR COMPLETED', 'SUCCESS');
+            log('========================================', 'INFO');
+            log(`📊 Total Pages: ${totalPages}`, 'STATS');
+            log(`📊 Total Resources: ${totalResources}`, 'STATS');
+            log(`📊 Total Queue Size: ${queue.length}`, 'STATS');
+            log(`📊 Total Unique URLs: ${visited.size}`, 'STATS');
+            log(`⏱️ Total Time: ${totalTime} seconds`, 'STATS');
+            log(`📁 Output Directory: ${outputDir}/${domain}`, 'STATS');
+            log('========================================', 'INFO');
+          }
+          
+          main().catch(console.error);
+          EOF
+          sed -i 's/waitForTimeout/waitFor/g' download.js
+      
+      - name: Run download
+        env:
+          SITE_URL: ${{ github.event.inputs.site_url }}
+        run: |
+          node download.js || true
+          echo ""
+          echo "========================================="
+          echo "DOWNLOAD LOG:"
+          echo "========================================="
+          cat download_log.txt || echo "No log file found"
+      
+      - name: Create 95MB ZIP parts and push
+        run: |
+          sudo apt-get install -y zip
+          
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
+          ZIP_NAME="mirror_${DOMAIN}_${TIMESTAMP}"
+          
+          if [ -d "./mirror" ]; then
+            echo "========================================="
+            echo "COMPRESSING: ${ZIP_NAME}.zip"
+            echo "========================================="
+            
+            cd mirror
+            zip -r -s 95m "../${ZIP_NAME}.zip" ./
+            cd ..
+            
+            COMPRESSED_SIZE=$(du -sh ${ZIP_NAME}.zip* 2>/dev/null | tail -1 | cut -f1)
+            echo "✅ Compression completed: ${COMPRESSED_SIZE}"
+            
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            git add ${ZIP_NAME}.zip* download_log.txt 2>/dev/null || true
+            git commit -m "Add full mirror of ${{ github.event.inputs.site_url }} - $(date)" 2>/dev/null || true
+            git push origin main
+            
+            echo ""
+            echo "========================================="
+            echo "✅ SUCCESS - PUSHED TO REPOSITORY"
+            echo "========================================="
+            echo "📦 Archive: ${ZIP_NAME}.zip"
+            echo "📋 Log: download_log.txt"
+            echo "📍 Repository: ${{ github.repository }}"
+            echo "========================================="
+          else
+            echo "❌ Mirror directory not found!"
+            exit 1
+          fi
+      
+      - name: Upload log as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-log
+          path: download_log.txt
+          retention-days: 30

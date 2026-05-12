@@ -1,33 +1,37 @@
-name: دانلود کامل سایت (بدون خطا)
+name: دانلود سایت و Push به ریپو
 
 on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: 'آدرس سایت'
+        description: 'آدرس کامل سایت'
         required: true
         type: string
         default: 'https://www.typescriptlang.org'
 
+permissions:
+  contents: write
+
 jobs:
-  download:
+  mirror-and-push:
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # ============================================
-      # دانلود با ignore کردن exit code 8
-      # ============================================
-      - name: Download website (ignoring harmless errors)
-        id: download
-        continue-on-error: true  # اجازه ادامه حتی با خطا
+      - name: Download complete website
         run: |
           SITE="${{ github.event.inputs.site_url }}"
+          DOMAIN=$(echo "$SITE" | sed 's|https\?://||' | cut -d'/' -f1)
           
+          echo "========================================="
           echo "شروع دانلود: $SITE"
+          echo "========================================="
           
-          # نکته مهم: || true باعث می‌شود exit code 8 نادیده گرفته شود
+          # دانلود کامل سایت
           wget \
             --recursive \
             --level=inf \
@@ -40,98 +44,126 @@ jobs:
             --limit-rate=500k \
             --no-clobber \
             --continue \
-            --user-agent="Mozilla/5.0" \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             --execute robots=off \
-            --directory-prefix="./mirror" \
             "$SITE" || true
           
-          echo "✅ دانلود کامل شد (خطاهای جزئی نادیده گرفته شدند)"
+          echo "✅ دانلود کامل شد"
           
-          # بررسی وجود فایل index.html برای اطمینان از موفقیت
-          if [ -f "./mirror/www.typescriptlang.org/index.html" ] || [ -f "./mirror/index.html" ]; then
-            echo "✅ فایل index.html پیدا شد - دانلود موفق بوده"
-            echo "download_success=true" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ فایل index.html پیدا نشد"
-            echo "download_success=false" >> $GITHUB_OUTPUT
+          # پیدا کردن پوشه دانلود شده
+          DOWNLOAD_DIR=$(find . -maxdepth 2 -type d \( -name "$DOMAIN" -o -name "www.$DOMAIN" -o -name "*.$DOMAIN" \) 2>/dev/null | head -1)
+          
+          if [ -z "$DOWNLOAD_DIR" ]; then
+            DOWNLOAD_DIR=$(find . -maxdepth 1 -type d ! -name "." ! -name ".git" ! -name ".github" 2>/dev/null | head -1)
           fi
-
-      # ============================================
-      # آمار دانلود
-      # ============================================
-      - name: Download statistics
-        if: always()
-        run: |
-          echo "========================================="
-          echo "          آمار دانلود"
-          echo "========================================="
           
-          if [ -d "./mirror" ]; then
-            FILE_COUNT=$(find ./mirror -type f 2>/dev/null | wc -l)
-            TOTAL_SIZE=$(du -sh ./mirror 2>/dev/null | cut -f1)
+          echo "download_dir=$DOWNLOAD_DIR" >> $GITHUB_ENV
+          echo "domain=$DOMAIN" >> $GITHUB_ENV
+
+      - name: Show download statistics
+        run: |
+          if [ -d "${{ env.download_dir }}" ]; then
+            FILE_COUNT=$(find "${{ env.download_dir }}" -type f | wc -l)
+            TOTAL_SIZE=$(du -sh "${{ env.download_dir }}" | cut -f1)
             
+            echo "========================================="
+            echo "آمار دانلود"
+            echo "========================================="
+            echo "📁 پوشه: ${{ env.download_dir }}"
             echo "📄 تعداد فایل‌ها: $FILE_COUNT"
             echo "💾 حجم کل: $TOTAL_SIZE"
-            
-            # نمایش پوشه‌های اصلی
-            echo ""
-            echo "پوشه‌های دانلود شده:"
-            ls -la ./mirror/
-          else
-            echo "❌ پوشه mirror وجود ندارد!"
           fi
 
-      # ============================================
-      # نصب RAR
-      # ============================================
-      - name: Install rar
-        if: always()
+      - name: Create ZIP archives with 95MB parts
         run: |
+          echo "========================================="
+          echo "ساخت فایل ZIP با پارت‌های 95 مگابایتی"
+          echo "========================================="
+          
+          DOWNLOAD_DIR="${{ env.download_dir }}"
+          DOMAIN="${{ env.domain }}"
+          
+          if [ -z "$DOWNLOAD_DIR" ] || [ ! -d "$DOWNLOAD_DIR" ]; then
+            echo "❌ پوشه دانلود یافت نشد!"
+            exit 0
+          fi
+          
+          # نصب zip
           sudo apt-get update
-          sudo apt-get install -y rar unrar
+          sudo apt-get install -y zip
+          
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          OUTPUT_NAME="website-mirror_${DOMAIN}_${TIMESTAMP}"
+          
+          # ساخت zip با پارت‌های 95 مگابایتی
+          # -s 95m : تقسیم به پارت‌های 95 مگابایت
+          # -r : recursive
+          zip -r -s 95m "${OUTPUT_NAME}.zip" "$DOWNLOAD_DIR"
+          
+          echo "✅ فایل‌های ZIP ساخته شدند"
+          ls -lh ${OUTPUT_NAME}.zip* 2>/dev/null
+          
+          echo "output_name=${OUTPUT_NAME}" >> $GITHUB_ENV
 
-      # ============================================
-      # ساخت فایل RAR
-      # ============================================
-      - name: Create RAR archive
-        if: always()
+      - name: Move files to release folder
         run: |
-          if [ -d "./mirror" ]; then
-            echo "📦 در حال ساخت فایل RAR..."
-            
-            cd mirror
-            rar a -v95m -m5 -rr10% -ep1 "../backup.rar" ./
-            cd ..
-            
-            echo "✅ فایل RAR ساخته شد:"
-            ls -lh backup*.rar
+          # ساخت پوشه برای فایل‌های آپلودی
+          mkdir -p releases/${{ env.output_name }}
+          
+          # حرکت فایل‌های ZIP به پوشه releases
+          mv ${{ env.output_name }}.zip* releases/${{ env.output_name }}/ 2>/dev/null || true
+          
+          # کپی یک فایل readme برای توضیح
+          cat > releases/${{ env.output_name }}/README.md << 'EOF'
+# آرشیو کامل سایت
+
+این آرشیو شامل تمام فایل‌های سایت می‌باشد.
+
+## نحوه استفاده:
+1. تمام فایل‌های `*.zip` و `*.z01`، `*.z02` و ... را دانلود کنید
+2. در یک پوشه قرار دهید
+3. فایل `*.zip` را Extract کنید
+4. فایل `index.html` را در مرورگر باز کنید
+
+## تاریخ ایجاد:
+$(date)
+EOF
+
+      - name: Commit and push to repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # اضافه کردن فایل‌ها
+          git add releases/
+          
+          # چک کردن تغییرات
+          if git diff --cached --quiet; then
+            echo "هیچ تغییر جدیدی برای push وجود ندارد"
           else
-            echo "❌ پوشه mirror وجود ندارد - RAR ساخته نشد"
+            git commit -m "Add website mirror for ${{ env.domain }} - $(date +'%Y-%m-%d %H:%M:%S')"
+            git push origin main
+            echo "✅ فایل‌ها با موفقیت به ریپو push شدند"
           fi
 
-      # ============================================
-      # آپلود به Artifacts
-      # ============================================
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: website-backup
-          path: |
-            backup*.rar
-            backup*.part*.rar
-          compression-level: 0
-          retention-days: 30
+      - name: Create tag for this version
+        run: |
+          TAG_NAME="mirror-${{ env.domain }}-$(date +%Y%m%d-%H%M%S)"
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+          echo "✅ تگ ایجاد شد: $TAG_NAME"
 
-      # ============================================
-      # گزارش نهایی
-      # ============================================
       - name: Final report
-        if: always()
         run: |
           echo ""
           echo "========================================="
-          echo "            گزارش نهایی"
+          echo "            عملیات با موفقیت انجام شد"
           echo "========================================="
-          echo "✅ عملیات با موفقیت انجام شد"
-          echo "📁 فایل‌ها در بخش Artifacts موجود است"
+          echo ""
+          echo "✅ فایل‌ها در مسیر زیر ذخیره شدند:"
+          echo "   releases/${{ env.output_name }}/"
+          echo ""
+          echo "📁 برای مشاهده فایل‌ها به ریپوی گیت‌هاب مراجعه کنید"
+          echo "🔗 https://github.com/${{ github.repository }}/tree/main/releases/${{ env.output_name }}"
+          echo ""
+          echo "🏷️ تگ ایجاد شده: mirror-${{ env.domain }}-$(date +%Y%m%d-%H%M%S)"

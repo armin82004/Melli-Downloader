@@ -1,88 +1,174 @@
-name: دانلود کامل سایت و تبدیل به RAR
+name: دانلود کامل سایت (آفلاین کامل)
 
 on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: 'آدرس سایت (مثال: https://example.com)'
+        description: 'آدرس کامل سایت (مثال: https://example.com)'
         required: true
         type: string
-        default: 'https://example.com'
-      part_size:
-        description: 'حجم هر پارت RAR (95m, 50m, 100m)'
+      max_retries:
+        description: 'تعداد دفعات تلاش مجدد در صورت خطا'
         required: false
-        type: string
-        default: '95m'
+        type: number
+        default: 3
+      wait_time:
+        description: 'زمان انتظار بین درخواست‌ها (ثانیه) - برای جلوگیری از مسدود شدن'
+        required: false
+        type: number
+        default: 2
 
 jobs:
-  download:
+  full-mirror:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download website with wget
-        run: |
-          SITE="${{ github.event.inputs.site_url }}"
-          echo "📥 Downloading: $SITE"
-          
-          # حذف https:// از ابتدای آدرس برای نام پوشه
-          DOMAIN=$(echo "$SITE" | sed 's|https\?://||' | sed 's|/.*$||')
-          
-          # دانلود کامل سایت با wget (این برای سایت‌های معمولی و React جزئی کار می‌کند)
-          wget \
-            --mirror \
-            --convert-links \
-            --adjust-extension \
-            --page-requisites \
-            --no-parent \
-            --wait=2 \
-            --random-wait \
-            --limit-rate=500k \
-            --no-clobber \
-            --continue \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            --directory-prefix=./downloads \
-            --execute robots=off \
-            "$SITE"
-          
-          echo "✅ Download completed!"
-
-      - name: Install rar tool
+      # ============================================
+      # نصب wget2 (نسخه جدیدتر و پایدارتر)
+      # ============================================
+      - name: Install wget2
         run: |
           sudo apt-get update
-          sudo apt-get install -y rar unrar
+          sudo apt-get install -y wget2 rar unrar
 
-      - name: Create RAR archive in 95MB parts
+      # ============================================
+      # دانلود کامل سایت با wget2 (بدون خطای code 8)
+      # ============================================
+      - name: Complete website mirror with wget2
+        id: download
         run: |
-          cd downloads
+          SITE="${{ github.event.inputs.site_url }}"
+          DOMAIN=$(echo "$SITE" | sed 's|https\?://||' | sed 's|/.*$||')
           
-          # پیدا کردن پوشه دانلود شده
-          DOWNLOAD_FOLDER=$(find . -maxdepth 1 -type d -name "*.com" -o -name "*.org" -o -name "*.net" -o -name "*.ir" 2>/dev/null | head -1)
+          echo "========================================="
+          echo "شروع آینه‌سازی کامل سایت: $SITE"
+          echo "========================================="
           
-          if [ -z "$DOWNLOAD_FOLDER" ]; then
-            DOWNLOAD_FOLDER="."
+          # گزینه‌های کامل برای دانلود کل سایت
+          wget2 \
+            --mirror \                    # آینه‌سازی کامل
+            --convert-links \             # تبدیل لینک‌ها به حالت محلی (آفلاین)
+            --adjust-extension \          # اصلاح پسوند فایل‌ها
+            --page-requisites \           # دانلود همه منابع (CSS, JS, images)
+            --no-parent \                 # عدم رفتن به دایرکتوری والد
+            --wait=${{ github.event.inputs.wait_time }} \  # تاخیر بین درخواست‌ها
+            --random-wait \               # تاخیر تصادفی (مثل انسان)
+            --limit-rate=1M \             # محدودیت سرعت برای احترام به سرور
+            --no-clobber \                # عدم بازنویسی فایل‌های موجود
+            --continue \                  # ادامه دانلود نیمه‌تمام
+            --tries=${{ github.event.inputs.max_retries }} \  # تعداد تلاش مجدد
+            --timeout=30 \                # تایم اوت 30 ثانیه
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --header="Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+            --header="Accept-Language: en-US,en;q=0.5" \
+            --span-hosts \                # اجازه دنبال کردن هاست‌های مختلف
+            --domains="$DOMAIN" \         # محدودیت به دامنه اصلی
+            --directory-prefix="./mirror" \
+            "$SITE"
+          
+          # ایجاد فایل نشانگر موفقیت
+          echo "mirror_completed" > ./mirror/.download_status
+          
+          echo "✅ دانلود با موفقیت کامل شد"
+
+      # ============================================
+      # بررسی و گزارش آمار دانلود
+      # ============================================
+      - name: Download statistics
+        run: |
+          echo "========================================="
+          echo "          آمار دانلود انجام شده"
+          echo "========================================="
+          
+          # پیدا کردن پوشه اصلی
+          MIRROR_DIR=$(find ./mirror -maxdepth 1 -type d -name "*.*" 2>/dev/null | head -1)
+          
+          if [ -z "$MIRROR_DIR" ]; then
+            MIRROR_DIR="./mirror"
           fi
           
-          echo "📦 Creating RAR from: $DOWNLOAD_FOLDER"
+          FILE_COUNT=$(find "$MIRROR_DIR" -type f 2>/dev/null | wc -l)
+          TOTAL_SIZE=$(du -sh "$MIRROR_DIR" 2>/dev/null | cut -f1)
           
-          # نام فایل خروجی
-          DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
+          echo "📁 پوشه: $MIRROR_DIR"
+          echo "📄 تعداد فایل‌ها: $FILE_COUNT"
+          echo "💾 حجم کل: $TOTAL_SIZE"
           
-          # ساخت RAR با پارت‌های 95 مگابایتی
-          rar a -v${{ github.event.inputs.part_size }} -m5 -rr10% -ep1 "../${DOMAIN}.rar" "$DOWNLOAD_FOLDER"/
-          
-          cd ..
-          echo "✅ RAR files created:"
-          ls -lh *.rar *.part*.rar 2>/dev/null || echo "No RAR files found"
+          # ذخیره در خروجی برای مراحل بعد
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "total_size=$TOTAL_SIZE" >> $GITHUB_OUTPUT
+          echo "mirror_dir=$MIRROR_DIR" >> $GITHUB_OUTPUT
 
-      - name: Upload RAR files as artifact
+      # ============================================
+      # ساخت فایل‌های RAR با پارت 95 مگابایتی
+      # ============================================
+      - name: Create RAR archives (95MB parts)
+        run: |
+          echo "========================================="
+          echo "     ساخت فایل‌های RAR (پارت 95 مگابایت)"
+          echo "========================================="
+          
+          MIRROR_DIR="${{ steps.download.outputs.mirror_dir }}"
+          if [ -z "$MIRROR_DIR" ] || [ ! -d "$MIRROR_DIR" ]; then
+            MIRROR_DIR="./mirror"
+          fi
+          
+          # پیدا کردن پوشه اصلی سایت
+          SITE_FOLDER=$(find "$MIRROR_DIR" -maxdepth 1 -type d -name "www.*" -o -name "*.com" -o -name "*.org" 2>/dev/null | head -1)
+          
+          if [ -z "$SITE_FOLDER" ]; then
+            SITE_FOLDER="$MIRROR_DIR"
+          fi
+          
+          DOMAIN=$(basename "$SITE_FOLDER")
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          OUTPUT_NAME="${DOMAIN}_${TIMESTAMP}"
+          
+          echo "📦 پوشه منبع: $SITE_FOLDER"
+          echo "📦 نام خروجی: $OUTPUT_NAME"
+          
+          # ساخت RAR با پارت 95 مگابایت و اطلاعات بازیابی 10%
+          rar a -v95m -m5 -rr10% -ep1 "${OUTPUT_NAME}.rar" "$SITE_FOLDER/"
+          
+          echo ""
+          echo "✅ فایل‌های RAR ساخته شدند:"
+          ls -lh ${OUTPUT_NAME}*.rar 2>/dev/null
+          
+          echo "rar_name=$OUTPUT_NAME" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # آپلود به GitHub Artifacts
+      # ============================================
+      - name: Upload to GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: website-backup
+          name: website-full-mirror-${{ github.run_number }}
           path: |
             *.rar
             *.part*.rar
           compression-level: 0
           retention-days: 30
+
+      # ============================================
+      # گزارش نهایی
+      # ============================================
+      - name: Final report
+        run: |
+          echo ""
+          echo "========================================="
+          echo "            عملیات با موفقیت انجام شد"
+          echo "========================================="
+          echo ""
+          echo "📊 خلاصه:"
+          echo "   - تعداد فایل‌های دانلود شده: ${{ steps.download.outputs.file_count }}"
+          echo "   - حجم کل سایت: ${{ steps.download.outputs.total_size }}"
+          echo ""
+          echo "📦 فایل‌های آفلاین:"
+          echo "   - در بخش Artifacts این اجرا قابل دانلود است"
+          echo "   - فایل‌های RAR را دانلود و Extract کنید"
+          echo "   - فایل index.html را در مرورگر باز کنید"
+          echo ""
+          echo "✅ سایت به طور کامل برای استفاده آفلاین آماده است!"

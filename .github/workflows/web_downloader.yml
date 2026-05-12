@@ -1,68 +1,120 @@
-name: Prerender and Mirror SPA Website
+name: Complete Website Mirror with SingleFile Crawler
 
 on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: 'آدرس کامل سایت (مثال: https://www.typescriptlang.org)'
+        description: 'Website URL'
         required: true
         type: string
+        default: 'https://www.typescriptlang.org'
+      max_depth:
+        description: 'Crawl depth (0 = unlimited)'
+        required: false
+        type: string
+        default: '0'
+      max_pages:
+        description: 'Max pages to save (0 = unlimited)'
+        required: false
+        type: string
+        default: '500'
 
 permissions:
   contents: write
 
 jobs:
-  prerender-spa:
+  mirror:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      # نصب ابزارهای پیش‌رندر
-      - name: Install Prerendering Tools
+      
+      - name: Install SingleFile CLI
         run: |
-          npm install -g prerender-spa-ultra react-snap
-
-      # مرحله حیاتی: پیش‌رندر کردن کامل سایت
-      - name: Prerender the Website
-        id: prerender
-        uses: antitoxic/prerender-spa-ultra@v1  # [citation:2][citation:3]
-        with:
-          website_root: './downloads'
-          meta_prerender_only: '1'
-          max_concurrent_pages: 5
-          selector_to_wait_for: 'body'
-        continue-on-error: true
-
-      # استفاده از react-snap برای اطمینان بیشتر (اختیاری اما قدرتمند)
-      - name: Enhance Prerendering with react-snap
-        uses: brycedorn/react-snap-action@v1.0.2  # [citation:6]
-        with:
-          source: './downloads'
-
-      - name: Create 95MB ZIP Archive
+          npm install -g single-file-cli
+          npm install puppeteer
+      
+      - name: Install Chrome
         run: |
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
           sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+      
+      - name: Run SingleFile Crawler
+        run: |
+          mkdir -p mirror
+          
+          # اجرای SingleFile با قابلیت خزیدن خودکار
+          # crawl-links: فعال کردن دنبال کردن لینک‌ها
+          # crawl-inner-links-only: فقط لینک‌های داخل دامنه اصلی
+          # crawl-max-depth: عمق نامحدود (0)
+          # crawl-replace-URLs: تبدیل لینک‌ها به حالت نسبی برای آفلاین
+          single-file "${{ github.event.inputs.site_url }}" \
+            --crawl-links=true \
+            --crawl-inner-links-only=true \
+            --crawl-no-parent=false \
+            --crawl-max-depth=${{ github.event.inputs.max_depth }} \
+            --crawl-replace-URLs=true \
+            --output-directory=./mirror \
+            --filename-template='{page-title}.html' \
+            --max-parallel-workers=4 \
+            --dump-content=false \
+            --browser-executable-path=$(which google-chrome-stable)
+          
+          echo "✅ Crawling completed"
+      
+      - name: List downloaded files
+        run: |
+          echo "=== Downloaded files ==="
+          find ./mirror -type f -name "*.html" | head -30
+          echo ""
+          echo "Total files: $(find ./mirror -type f | wc -l)"
+          echo "Total size: $(du -sh ./mirror | cut -f1)"
+      
+      - name: Create 95MB ZIP parts
+        run: |
           sudo apt-get install -y zip
           
-          DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||')
+          DOMAIN=$(echo "${{ github.event.inputs.site_url }}" | sed 's|https\?://||' | sed 's|/.*$||' | sed 's|\.|_|g')
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          ZIP_NAME="prerendered_${DOMAIN}_${TIMESTAMP}"
-          
-          zip -r -s 95m "${ZIP_NAME}.zip" ./downloads/
-          
+          ZIP_NAME="full_site_${DOMAIN}_${TIMESTAMP}"
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-
-      # آپلود فایل خروجی به ریپازیتوری
-      - name: Commit and Push to Repository
+          
+          if [ -d "./mirror" ]; then
+            cd mirror
+            zip -r -s 95m "../${ZIP_NAME}.zip" ./
+            cd ..
+          fi
+          
+          echo "✅ Archive created"
+          ls -lh ${ZIP_NAME}.zip*
+      
+      - name: Push to repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ${ZIP_NAME}.zip* 2>/dev/null || true
-          git commit -m "Prerendered mirror of ${{ github.event.inputs.site_url }}" 2>/dev/null || true
+          git commit -m "Full mirror of ${{ github.event.inputs.site_url }} - depth ${{ github.event.inputs.max_depth }}" 2>/dev/null || true
           git push origin main
-          echo "✅ آپلود کامل شد! آرشیو نهایی: ${ZIP_NAME}.zip"
+          
+          echo ""
+          echo "========================================="
+          echo "✅ SUCCESS"
+          echo "========================================="
+          echo "📦 Archive: ${ZIP_NAME}.zip"
+          echo "📍 Repository: ${{ github.repository }}"
+          echo "========================================="
+      
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawling-log
+          path: mirror/*.log
+          retention-days: 7

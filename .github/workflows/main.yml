@@ -1,4 +1,4 @@
-name: Download YouTube Video & Subtitles
+name: Download Only Subtitles
 
 on:
   workflow_dispatch:
@@ -7,19 +7,14 @@ on:
         description: 'YouTube video URL'
         required: true
         type: string
-      original_lang:
-        description: 'Original language code (e.g., en, fa, ar)'
+      target_lang:
+        description: 'Language code (en, fa, de, etc.)'
         required: true
         type: string
         default: 'en'
-      target_lang:
-        description: 'Target subtitle language code'
-        required: true
-        type: string
-        default: 'fa'
 
 jobs:
-  download-and-upload:
+  get-subtitles:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,110 +22,57 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install yt-dlp and ffmpeg
+      - name: Install YouTube Transcript API
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
-          pip3 install yt-dlp
-          
-      - name: Download video and subtitles
-        run: |
-          mkdir -p output
-          cd output
-          
-          # دانلود ویدیو با کیفیت خوب (حداکثر 720p برای کاهش حجم)
-          yt-dlp -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]" \
-                 --write-subs \
-                 --sub-lang ${{ github.event.inputs.original_lang }},${{ github.event.inputs.target_lang }} \
-                 --sub-format srt \
-                 --convert-subs srt \
-                 --write-auto-subs \
-                 --output "video.%(ext)s" \
-                 ${{ github.event.inputs.youtube_url }}
-                 
-          # اگر زیرنویس جداگانه دانلود شد، آن را rename کنید
-          for file in *.vtt; do
-            mv "$file" "${file%.vtt}.srt" 2>/dev/null || true
-          done
-          
-          cd ..
-          
-      - name: Generate bilingual subtitles (if two languages exist)
-        run: |
-          cd output
-          
-          # پیدا کردن فایل‌های زیرنویس
-          original_sub=$(ls *.${ORIG_LANG}.srt 2>/dev/null | head -1)
-          target_sub=$(ls *.${TARGET_LANG}.srt 2>/dev/null | head -1)
-          
-          if [[ -f "$original_sub" && -f "$target_sub" ]]; then
-            echo "Creating bilingual subtitle file..."
-            
-            # ایجاد فایل دو زبانه (ساده: چسباندن خط به خط)
-            # روش حرفه‌ای: می‌توانید از ابزارهای پردازش srt استفاده کنید
-            paste -d '\n' "$original_sub" "$target_sub" > bilingual_subtitle.srt 2>/dev/null || \
-            echo "بilingual subtitle generation failed" > bilingual_subtitle.srt
-          else
-            echo "Not enough subtitle files for bilingual generation"
-          fi
-          
-          cd ..
-          
-        env:
-          ORIG_LANG: ${{ github.event.inputs.original_lang }}
-          TARGET_LANG: ${{ github.event.inputs.target_lang }}
+          pip install youtube-transcript-api
 
-      - name: Create README with download info
+      - name: Download subtitle only
         run: |
-          cat > output/README.md << EOF
-          # Downloaded from YouTube
-          - **Video URL**: ${{ github.event.inputs.youtube_url }}
-          - **Download Date**: $(date)
-          - **Original Language**: ${{ github.event.inputs.original_lang }}
-          - **Target Language**: ${{ github.event.inputs.target_lang }}
+          python3 << EOF
+          from youtube_transcript_api import YouTubeTranscriptApi
+          import json
+          import re
           
-          ## Files included:
-          $(ls -la output/)
+          # استخراج Video ID از URL
+          video_url = "${{ github.event.inputs.youtube_url }}"
+          video_id = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11})', video_url).group(1)
+          
+          # دریافت زیرنویس
+          ytt_api = YouTubeTranscriptApi()
+          
+          try:
+              # تلاش برای زیرنویس دستی
+              transcript = ytt_api.fetch(video_id, languages=['${{ github.event.inputs.target_lang }}'])
+          except:
+              # اگر نبود، سراغ زیرنویس خودکار می‌رود
+              transcript_list = ytt_api.list(video_id)
+              transcript = transcript_list.find_generated_transcript(['${{ github.event.inputs.target_lang }}'])
+          
+          # ذخیره زیرنویس به صورت JSON و SRT
+          os.makedirs('output', exist_ok=True)
+          
+          # ذخیره به فرمت SRT
+          with open('output/subtitle.srt', 'w', encoding='utf-8') as f:
+              for i, snippet in enumerate(transcript, 1):
+                  start = snippet['start']
+                  end = start + snippet['duration']
+                  text = snippet['text']
+                  f.write(f"{i}\n")
+                  f.write(f"{format_time(start)} --> {format_time(end)}\n")
+                  f.write(f"{text}\n\n")
+          
+          # ذخیره به فرمت JSON
+          with open('output/subtitle.json', 'w', encoding='utf-8') as f:
+              json.dump(transcript, f, indent=2, ensure_ascii=False)
+              
+          print("✅ Subtitle downloaded successfully!")
           EOF
-
-      - name: Compress and split if >95MB
-        run: |
-          cd output
           
-          # محاسبه حجم
-          total_size=$(du -sb . | cut -f1)
-          max_size=$((95 * 1024 * 1024))
-          
-          if [ $total_size -gt $max_size ]; then
-            echo "Size: $total_size bytes > 95MB, creating split zip"
-            zip -r -s 95m ../youtube-content.zip *
-          else
-            echo "Size: $total_size bytes <= 95MB, creating single zip"
-            zip -r ../youtube-content.zip *
-          fi
-          
-          cd ..
-          
-          # پاک کردن فایل‌های اصلی برای اینکه فقط zip بماند
-          rm -rf output
-          mkdir -p output
-          mv youtube-content.zip* output/
-          
-      - name: Upload to repository
+      - name: Commit and push subtitles
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # حذف فایل‌های قدیمی در شاخه output (اختیاری)
-          git rm -rf output/ 2>/dev/null || true
-          
-          # افزودن فایل جدید
-          mkdir -p output
-          mv youtube-content.zip* output/ 2>/dev/null || true
-          
           git add output/
-          git commit -m "Download YouTube video: ${{ github.event.inputs.youtube_url }} (split if >95MB)" || echo "No changes to commit"
-          git push origin HEAD:${{ github.ref_name }}
+          git commit -m "Add subtitle for ${{ github.event.inputs.youtube_url }}" || echo "No changes"
+          git push

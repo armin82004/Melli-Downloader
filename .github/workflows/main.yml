@@ -1,0 +1,117 @@
+name: Download YouTube Video & Subtitles
+
+on:
+  workflow_dispatch:  # اجرای دستی از طریق GitHub Actions
+    inputs:
+      youtube_url:
+        description: 'YouTube video URL'
+        required: true
+        type: string
+      original_lang:
+        description: 'Original language code (e.g., en, fa)'
+        required: true
+        type: string
+        default: 'en'
+      target_lang:
+        description: 'Target subtitle language code'
+        required: true
+        type: string
+        default: 'fa'
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # اجازه آپلود فایل در ریپو
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          # در صورت نیاز به بسته‌های سیستمی برای yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y yt-dlp ffmpeg zip
+
+      - name: Download video & generate subtitles
+        env:
+          YT_URL: ${{ github.event.inputs.youtube_url }}
+          ORIG_LANG: ${{ github.event.inputs.original_lang }}
+          TARGET_LANG: ${{ github.event.inputs.target_lang }}
+        run: |
+          # ساخت پوشه خروجی
+          mkdir -p output
+          
+          # بررسی کنید که ریپو اصلی چه اسکریپتی دارد
+          # با توجه به فایل index.mjs، احتمالا می‌توانید مستقیما index.mjs را با پارامتر فراخوانی کنید
+          # ولی اون ابزار UI دارد، برای خط فرمان باید اصلاح شود.
+          # راهکار: استفاده از yt-dlp برای دانلود ویدیو و زیرنویس
+          
+          echo "Downloading video..."
+          yt-dlp -f "best[height<=720]" \
+                 --write-subs \
+                 --sub-lang $ORIG_LANG,$TARGET_LANG \
+                 --convert-subs srt \
+                 -o "output/video.%(ext)s" \
+                 --write-auto-subs \
+                 $YT_URL
+                 
+          # اگر زیرنویس دو زبانه می‌خواهید، می‌توانید از --embed-subs و --sub-langs استفاده کنید
+          # اما ریپو اصلی برای زیرنویس دو زبانه UI دارد و نیاز به کدنویسی بیشتر دارد
+
+      - name: Organize output files
+        run: |
+          # تمام فایل‌های دانلود شده در output/ را جمع کنید
+          ls -la output/
+          # برای اطمینان از وجود فایل اصلی
+          if [ ! "$(ls -A output)" ]; then
+            echo "No file downloaded!"
+            exit 1
+          fi
+
+      - name: Split and zip if >95MB
+        run: |
+          cd output
+          # محاسبه حجم کل فایل‌های موجود
+          total_size=$(du -sb . | cut -f1)
+          max_size=$((95 * 1024 * 1024))  # 95 مگابایت
+          
+          if [ $total_size -gt $max_size ]; then
+            echo "Total size $total_size > 95MB, splitting into multi-part zip"
+            zip -r -s 95m archive.zip *
+            mv archive.zip ../
+            mv archive.z* ../
+            cd ..
+            # فایل‌های اصلی را حذف می‌کنیم تا دوباره آپلود نشوند
+            rm -rf output
+            mkdir output
+            mv archive.* output/
+          else
+            echo "Total size $total_size <= 95MB, creating single zip"
+            zip -r output.zip output/
+            mv output.zip output/
+          fi
+
+      - name: Upload to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # اگر شاخه output وجود ندارد بساز
+          mkdir -p output
+          
+          # افزودن فایل‌ها به git
+          git add output/
+          git commit -m "Add downloaded video and subtitles from ${{ github.event.inputs.youtube_url }}" || echo "No changes to commit"
+          
+          # پوش کردن به ریپو
+          git push origin HEAD:${{ github.ref_name }}

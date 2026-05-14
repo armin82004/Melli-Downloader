@@ -32,93 +32,90 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pyppeteer
+          # نصب کرومیوم به صورت دستی
           python -c "import pyppeteer; pyppeteer.chromium_downloader.download_chromium()"
 
       - name: Create download script
         run: |
           cat > save_as_mhtml.py << 'EOF'
           import asyncio
-          import os
           import re
           from pathlib import Path
           from pyppeteer import launch
-          from urllib.parse import urlparse
           import argparse
+          import traceback
 
           async def save_as_mhtml(url, output_path):
-              browser = await launch(
-                  headless=True,
-                  args=[
-                      '--no-sandbox',
-                      '--disable-setuid-sandbox',
-                      '--disable-dev-shm-usage',
-                      '--disable-blink-features=AutomationControlled',
-                      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                  ]
-              )
-              
-              page = await browser.newPage()
-              
-              # پنهان کردن اتومیشن
-              await page.evaluateOnNewDocument('''
-                  Object.defineProperty(navigator, 'webdriver', {
-                      get: () => undefined
-                  });
-                  Object.defineProperty(navigator, 'plugins', {
-                      get: () => [1, 2, 3, 4, 5]
-                  });
-                  window.chrome = { runtime: {} };
-              ''')
-              
-              await page.setViewport({'width': 1920, 'height': 1080})
-              
+              browser = None
               try:
-                  # رفتن به صفحه با تنظیمات timeout مناسب
+                  print(f"Starting browser...")
+                  browser = await launch(
+                      headless=True,
+                      args=[
+                          '--no-sandbox',
+                          '--disable-setuid-sandbox',
+                          '--disable-dev-shm-usage',
+                          '--disable-web-security',
+                          '--disable-features=IsolateOrigins,site-per-process',
+                      ],
+                      handleSIGINT=False,
+                      handleSIGTERM=False,
+                      handleSIGHUP=False
+                  )
+                  
+                  page = await browser.newPage()
+                  
+                  # تنظیم User-Agent واقعی
+                  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+                  
+                  print(f"Navigating to {url}...")
+                  
+                  # رفتن به صفحه
                   response = await page.goto(url, {
-                      'waitUntil': 'networkidle2',
-                      'timeout': 60000
+                      'waitUntil': 'load',
+                      'timeout': 30000
                   })
                   
-                  if response and response.status >= 400:
-                      print(f"Error: HTTP {response.status}")
-                      return False
+                  if response:
+                      print(f"HTTP Status: {response.status}")
+                      
+                      if response.status >= 400:
+                          print(f"Error: HTTP {response.status}")
+                          return False
                   
+                  # منتظر ماندن برای لود کامل
+                  await asyncio.sleep(5)
+                  
+                  # چک کردن URL نهایی
                   final_url = page.url
                   print(f"Final URL: {final_url}")
                   
-                  parsed_original = urlparse(url)
-                  parsed_final = urlparse(final_url)
-                  
-                  if parsed_original.netloc == parsed_final.netloc and parsed_final.path == '/':
-                      print("Warning: Redirected to homepage!")
-                  
-                  # صبر برای اجرای جاوااسکریپت
-                  await asyncio.sleep(5)
-                  
-                  # اسکرول صفحه برای لود محتوای lazy
-                  await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                  await asyncio.sleep(2)
-                  await page.evaluate('window.scrollTo(0, 0)')
-                  await asyncio.sleep(1)
-                  
-                  # گرفتن اسکرین‌شات برای دیباگ (اختیاری)
-                  await page.screenshot({'path': '/tmp/debug.png'})
-                  
-                  # ذخیره به فرمت MHTML
+                  # ذخیره به عنوان MHTML
+                  print("Saving as MHTML...")
                   client = await page.target.createCDPSession()
-                  mhtml_data = await client.send('Page.captureSnapshot', {})
+                  result = await client.send('Page.captureSnapshot', {})
                   
+                  # ذخیره فایل
                   with open(output_path, 'w', encoding='utf-8') as f:
-                      f.write(mhtml_data['data'])
+                      f.write(result['data'])
                   
-                  print(f"Saved: {output_path}")
+                  # بررسی حجم فایل
+                  file_size = Path(output_path).stat().st_size
+                  print(f"File saved: {output_path} ({file_size} bytes)")
+                  
+                  if file_size < 1000:  # اگر فایل خیلی کوچک باشد
+                      print("Warning: File size is very small, might be an error page")
+                      return False
+                  
                   return True
                   
               except Exception as e:
                   print(f"Error: {str(e)}")
+                  traceback.print_exc()
                   return False
               finally:
-                  await browser.close()
+                  if browser:
+                      await browser.close()
 
           if __name__ == "__main__":
               parser = argparse.ArgumentParser()
@@ -126,17 +123,30 @@ jobs:
               parser.add_argument('--title')
               args = parser.parse_args()
               
+              # ساخت نام فایل
               if args.title:
                   filename = f"{args.title}.mhtml"
               else:
-                  safe_name = re.sub(r'[^\w\-_\.]', '_', args.url)
-                  filename = f"{safe_name[:50]}.mhtml"
+                  # استفاده از تایم‌استمپ برای نام فایل
+                  from datetime import datetime
+                  timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                  filename = f"page_{timestamp}.mhtml"
               
               download_dir = Path('download')
               download_dir.mkdir(exist_ok=True)
               output_path = download_dir / filename
               
-              asyncio.run(save_as_mhtml(args.url, str(output_path)))
+              print(f"Output path: {output_path}")
+              
+              # اجرا
+              success = asyncio.run(save_as_mhtml(args.url, str(output_path)))
+              
+              if not success:
+                  print("Failed to download page")
+                  exit(1)
+              else:
+                  print("Download completed successfully")
+                  exit(0)
           EOF
 
       - name: Run MHTML downloader
@@ -144,17 +154,29 @@ jobs:
           python save_as_mhtml.py \
             --url "${{ github.event.inputs.url }}" \
             ${{ github.event.inputs.title && format('--title "{0}"', github.event.inputs.title) || '' }}
+        continue-on-error: false
 
+      - name: List download directory
+        run: |
+          echo "Contents of download directory:"
+          ls -la download/ || echo "No download directory found"
+          
       - name: Commit and push download folder to repo
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          if [ -d "download" ] && [ "$(ls -A download)" ]; then
+          # بررسی وجود فایل‌ها
+          if [ -d "download" ] && [ "$(ls -A download 2>/dev/null)" ]; then
+            echo "Files found, committing..."
             git add download/
             git commit -m "Add MHTML archive for ${{ github.event.inputs.url }}" || echo "No changes to commit"
             git push
+            echo "Push completed"
           else
-            echo "No files to download"
+            echo "No files to download - check previous step for errors"
+            echo "Current directory contents:"
+            ls -la
             exit 1
           fi

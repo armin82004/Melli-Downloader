@@ -59,18 +59,23 @@ jobs:
               
               page = await browser.newPage()
               
+              # پنهان کردن اتومیشن
               await page.evaluateOnNewDocument('''
                   Object.defineProperty(navigator, 'webdriver', {
                       get: () => undefined
                   });
+                  Object.defineProperty(navigator, 'plugins', {
+                      get: () => [1, 2, 3, 4, 5]
+                  });
+                  window.chrome = { runtime: {} };
               ''')
               
               await page.setViewport({'width': 1920, 'height': 1080})
-              await page.setDefaultNavigationTimeout(60000)
               
               try:
+                  # رفتن به صفحه با تنظیمات timeout مناسب
                   response = await page.goto(url, {
-                      'waitUntil': ['networkidle2', 'load', 'domcontentloaded'],
+                      'waitUntil': 'networkidle2',
                       'timeout': 60000
                   })
                   
@@ -87,13 +92,19 @@ jobs:
                   if parsed_original.netloc == parsed_final.netloc and parsed_final.path == '/':
                       print("Warning: Redirected to homepage!")
                   
-                  await asyncio.sleep(3)
+                  # صبر برای اجرای جاوااسکریپت
+                  await asyncio.sleep(5)
                   
+                  # اسکرول صفحه برای لود محتوای lazy
                   await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                   await asyncio.sleep(2)
                   await page.evaluate('window.scrollTo(0, 0)')
                   await asyncio.sleep(1)
                   
+                  # گرفتن اسکرین‌شات برای دیباگ (اختیاری)
+                  await page.screenshot({'path': '/tmp/debug.png'})
+                  
+                  # ذخیره به فرمت MHTML
                   client = await page.target.createCDPSession()
                   mhtml_data = await client.send('Page.captureSnapshot', {})
                   
@@ -104,7 +115,7 @@ jobs:
                   return True
                   
               except Exception as e:
-                  print(f"Error: {e}")
+                  print(f"Error: {str(e)}")
                   return False
               finally:
                   await browser.close()

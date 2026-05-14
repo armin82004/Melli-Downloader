@@ -1,160 +1,57 @@
-name: MHTML Download with Stealth
+name: MHTML ذخیره صفحه به 
+
 
 on:
   workflow_dispatch:
     inputs:
       url:
+        description: 'URL of the webpage to download'
         required: true
         type: string
       title:
-        description: 'Optional title for the output file'
+        description: 'Optional title for the output file (no spaces/special chars)'
         required: false
         type: string
 
+        
 permissions:
   contents: write
+
 
 jobs:
   download:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '18'
-          
-      - name: Install playwright with stealth
+          python-version: '3.10'
+
+      - name: Install dependencies
         run: |
-          npm init -y
-          npm install playwright playwright-extra puppeteer-extra-plugin-stealth
-          npx playwright install chromium
-          
-      - name: Create download script
+          pip install pyppeteer
+
+      - name: Run MHTML downloader
         run: |
-          cat > download.js << 'EOF'
-          const { chromium } = require('playwright-extra');
-          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-          const fs = require('fs');
-          const path = require('path');
-          
-          chromium.use(StealthPlugin());
-          
-          async function downloadPage(url, title) {
-              const browser = await chromium.launch({
-                  headless: true,
-                  args: ['--no-sandbox', '--disable-setuid-sandbox']
-              });
-              
-              const context = await browser.newContext({
-                  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  viewport: { width: 1920, height: 1080 }
-              });
-              
-              const page = await context.newPage();
-              
-              // اضافه کردن هدرهای واقعی
-              await page.setExtraHTTPHeaders({
-                  'Accept-Language': 'en-US,en;q=0.9',
-                  'Accept-Encoding': 'gzip, deflate, br',
-                  'Referer': 'https://www.google.com/'
-              });
-              
-              try {
-                  console.log('Navigating to:', url);
-                  await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-                  await page.waitForTimeout(5000);
-                  
-                  // ساخت نام فایل
-                  let filename = 'page.mhtml';
-                  if (title) {
-                      filename = `${title.replace(/[^a-zA-Z0-9]/g, '_')}.mhtml`;
-                  } else {
-                      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                      filename = `page_${timestamp}.mhtml`;
-                  }
-                  
-                  // اطمینان از وجود پوشه download
-                  const downloadDir = path.join(process.cwd(), 'download');
-                  if (!fs.existsSync(downloadDir)) {
-                      fs.mkdirSync(downloadDir, { recursive: true });
-                  }
-                  
-                  const filePath = path.join(downloadDir, filename);
-                  
-                  // ذخیره MHTML
-                  const client = await page.context().newCDPSession(page);
-                  const { data } = await client.send('Page.captureSnapshot');
-                  
-                  fs.writeFileSync(filePath, data);
-                  console.log('Downloaded successfully to:', filePath);
-                  
-                  // بررسی حجم فایل
-                  const stats = fs.statSync(filePath);
-                  console.log(`File size: ${(stats.size / 1024).toFixed(2)} KB`);
-                  
-              } catch(e) {
-                  console.error('Error:', e.message);
-                  // ذخیره اسکرین‌شات برای دیباگ
-                  const screenshotPath = path.join(process.cwd(), 'download', 'error.png');
-                  if (!fs.existsSync(path.dirname(screenshotPath))) {
-                      fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-                  }
-                  await page.screenshot({ path: screenshotPath });
-                  console.log('Screenshot saved to:', screenshotPath);
-                  throw e;
-              }
-              
-              await browser.close();
-          }
-          
-          const url = process.argv[2];
-          const title = process.argv[3];
-          downloadPage(url, title).catch(err => {
-              console.error('Fatal error:', err);
-              process.exit(1);
-          });
-          EOF
-          
-      - name: Run downloader
-        run: |
-          node download.js "${{ github.event.inputs.url }}" "${{ github.event.inputs.title }}"
-          
-      - name: List download directory
-        run: |
-          echo "Contents of download directory:"
-          ls -la download/ || echo "No download directory found"
-          
-      - name: Commit and push to repository
+          if [ -n "${{ github.event.inputs.title }}" ]; then
+            python save_as_mhtml.py \
+              --url "${{ github.event.inputs.url }}" \
+              --title "${{ github.event.inputs.title }}"
+          else
+            python save_as_mhtml.py \
+              --url "${{ github.event.inputs.url }}"
+          fi
+
+
+
+      - name: Commit and push download folder to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # بررسی وجود فایل‌ها
-          if [ -d "download" ] && [ "$(ls -A download 2>/dev/null)" ]; then
-            echo "Files found in download directory:"
-            ls -la download/
-            
-            # اضافه کردن فایل‌ها به git
-            git add download/
-            
-            # Commit کردن
-            git commit -m "Add MHTML archive for ${{ github.event.inputs.url }}" || echo "No changes to commit"
-            
-            # Push به ریپو
-            git push
-            echo "Successfully pushed to repository"
-          else
-            echo "No files found in download directory"
-            echo "Current directory structure:"
-            ls -la
-            exit 1
-          fi
-          
-      - name: Upload artifact (backup)
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: downloaded-page-backup
-          path: download/
+          git add download/
+          git commit -m "Add MHTML archive for ${{ github.event.inputs.url }}" || echo "No changes to commit"
+          git push

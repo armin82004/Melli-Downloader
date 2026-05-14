@@ -1,0 +1,149 @@
+name: MHTML ذخیره صفحه به
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL of the webpage to download'
+        required: true
+        type: string
+      title:
+        description: 'Optional title for the output file (no spaces/special chars)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install pyppeteer
+          python -c "import pyppeteer; pyppeteer.chromium_downloader.download_chromium()"
+
+      - name: Create download script
+        run: |
+          cat > save_as_mhtml.py << 'EOF'
+          import asyncio
+          import os
+          import re
+          from pathlib import Path
+          from pyppeteer import launch
+          from urllib.parse import urlparse
+          import argparse
+
+          async def save_as_mhtml(url, output_path):
+              browser = await launch(
+                  headless=True,
+                  args=[
+                      '--no-sandbox',
+                      '--disable-setuid-sandbox',
+                      '--disable-dev-shm-usage',
+                      '--disable-blink-features=AutomationControlled',
+                      '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                  ]
+              )
+              
+              page = await browser.newPage()
+              
+              await page.evaluateOnNewDocument('''
+                  Object.defineProperty(navigator, 'webdriver', {
+                      get: () => undefined
+                  });
+              ''')
+              
+              await page.setViewport({'width': 1920, 'height': 1080})
+              await page.setDefaultNavigationTimeout(60000)
+              
+              try:
+                  response = await page.goto(url, {
+                      'waitUntil': ['networkidle2', 'load', 'domcontentloaded'],
+                      'timeout': 60000
+                  })
+                  
+                  if response and response.status >= 400:
+                      print(f"Error: HTTP {response.status}")
+                      return False
+                  
+                  final_url = page.url
+                  print(f"Final URL: {final_url}")
+                  
+                  parsed_original = urlparse(url)
+                  parsed_final = urlparse(final_url)
+                  
+                  if parsed_original.netloc == parsed_final.netloc and parsed_final.path == '/':
+                      print("Warning: Redirected to homepage!")
+                  
+                  await asyncio.sleep(3)
+                  
+                  await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                  await asyncio.sleep(2)
+                  await page.evaluate('window.scrollTo(0, 0)')
+                  await asyncio.sleep(1)
+                  
+                  client = await page.target.createCDPSession()
+                  mhtml_data = await client.send('Page.captureSnapshot', {})
+                  
+                  with open(output_path, 'w', encoding='utf-8') as f:
+                      f.write(mhtml_data['data'])
+                  
+                  print(f"Saved: {output_path}")
+                  return True
+                  
+              except Exception as e:
+                  print(f"Error: {e}")
+                  return False
+              finally:
+                  await browser.close()
+
+          if __name__ == "__main__":
+              parser = argparse.ArgumentParser()
+              parser.add_argument('--url', required=True)
+              parser.add_argument('--title')
+              args = parser.parse_args()
+              
+              if args.title:
+                  filename = f"{args.title}.mhtml"
+              else:
+                  safe_name = re.sub(r'[^\w\-_\.]', '_', args.url)
+                  filename = f"{safe_name[:50]}.mhtml"
+              
+              download_dir = Path('download')
+              download_dir.mkdir(exist_ok=True)
+              output_path = download_dir / filename
+              
+              asyncio.run(save_as_mhtml(args.url, str(output_path)))
+          EOF
+
+      - name: Run MHTML downloader
+        run: |
+          python save_as_mhtml.py \
+            --url "${{ github.event.inputs.url }}" \
+            ${{ github.event.inputs.title && format('--title "{0}"', github.event.inputs.title) || '' }}
+
+      - name: Commit and push download folder to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ -d "download" ] && [ "$(ls -A download)" ]; then
+            git add download/
+            git commit -m "Add MHTML archive for ${{ github.event.inputs.url }}" || echo "No changes to commit"
+            git push
+          else
+            echo "No files to download"
+            exit 1
+          fi

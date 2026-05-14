@@ -37,14 +37,9 @@ jobs:
 
       - name: Run MHTML downloader
         run: |
-          if [ -n "${{ github.event.inputs.title }}" ]; then
-            python save_as_mhtml.py \
-              --url "${{ github.event.inputs.url }}" \
-              --title "${{ github.event.inputs.title }}"
-          else
-            python save_as_mhtml.py \
-              --url "${{ github.event.inputs.url }}"
-          fi
+          python save_as_mhtml.py \
+            --url "${{ github.event.inputs.url }}" \
+            ${GITHUB_ACTOR:+--title "${{ github.event.inputs.title }}"}
 
 
 

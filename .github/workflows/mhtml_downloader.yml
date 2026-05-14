@@ -1,4 +1,4 @@
-name: MHTML ذخیره صفحه به
+name: MHTML ذخیره صفحه به (نسخه جایگزین)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       title:
-        description: 'Optional title for the output file (no spaces/special chars)'
+        description: 'Optional title for the output file'
         required: false
         type: string
 
@@ -18,165 +18,31 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+      
+      - name: Install single-file
         run: |
-          pip install pyppeteer
-          # نصب کرومیوم به صورت دستی
-          python -c "import pyppeteer; pyppeteer.chromium_downloader.download_chromium()"
-
-      - name: Create download script
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+          npm install -g single-file-cli
+      
+      - name: Download page as MHTML
         run: |
-          cat > save_as_mhtml.py << 'EOF'
-          import asyncio
-          import re
-          from pathlib import Path
-          from pyppeteer import launch
-          import argparse
-          import traceback
-
-          async def save_as_mhtml(url, output_path):
-              browser = None
-              try:
-                  print(f"Starting browser...")
-                  browser = await launch(
-                      headless=True,
-                      args=[
-                          '--no-sandbox',
-                          '--disable-setuid-sandbox',
-                          '--disable-dev-shm-usage',
-                          '--disable-web-security',
-                          '--disable-features=IsolateOrigins,site-per-process',
-                      ],
-                      handleSIGINT=False,
-                      handleSIGTERM=False,
-                      handleSIGHUP=False
-                  )
-                  
-                  page = await browser.newPage()
-                  
-                  # تنظیم User-Agent واقعی
-                  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-                  
-                  print(f"Navigating to {url}...")
-                  
-                  # رفتن به صفحه
-                  response = await page.goto(url, {
-                      'waitUntil': 'load',
-                      'timeout': 30000
-                  })
-                  
-                  if response:
-                      print(f"HTTP Status: {response.status}")
-                      
-                      if response.status >= 400:
-                          print(f"Error: HTTP {response.status}")
-                          return False
-                  
-                  # منتظر ماندن برای لود کامل
-                  await asyncio.sleep(5)
-                  
-                  # چک کردن URL نهایی
-                  final_url = page.url
-                  print(f"Final URL: {final_url}")
-                  
-                  # ذخیره به عنوان MHTML
-                  print("Saving as MHTML...")
-                  client = await page.target.createCDPSession()
-                  result = await client.send('Page.captureSnapshot', {})
-                  
-                  # ذخیره فایل
-                  with open(output_path, 'w', encoding='utf-8') as f:
-                      f.write(result['data'])
-                  
-                  # بررسی حجم فایل
-                  file_size = Path(output_path).stat().st_size
-                  print(f"File saved: {output_path} ({file_size} bytes)")
-                  
-                  if file_size < 1000:  # اگر فایل خیلی کوچک باشد
-                      print("Warning: File size is very small, might be an error page")
-                      return False
-                  
-                  return True
-                  
-              except Exception as e:
-                  print(f"Error: {str(e)}")
-                  traceback.print_exc()
-                  return False
-              finally:
-                  if browser:
-                      await browser.close()
-
-          if __name__ == "__main__":
-              parser = argparse.ArgumentParser()
-              parser.add_argument('--url', required=True)
-              parser.add_argument('--title')
-              args = parser.parse_args()
-              
-              # ساخت نام فایل
-              if args.title:
-                  filename = f"{args.title}.mhtml"
-              else:
-                  # استفاده از تایم‌استمپ برای نام فایل
-                  from datetime import datetime
-                  timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                  filename = f"page_{timestamp}.mhtml"
-              
-              download_dir = Path('download')
-              download_dir.mkdir(exist_ok=True)
-              output_path = download_dir / filename
-              
-              print(f"Output path: {output_path}")
-              
-              # اجرا
-              success = asyncio.run(save_as_mhtml(args.url, str(output_path)))
-              
-              if not success:
-                  print("Failed to download page")
-                  exit(1)
-              else:
-                  print("Download completed successfully")
-                  exit(0)
-          EOF
-
-      - name: Run MHTML downloader
-        run: |
-          python save_as_mhtml.py \
-            --url "${{ github.event.inputs.url }}" \
-            ${{ github.event.inputs.title && format('--title "{0}"', github.event.inputs.title) || '' }}
-        continue-on-error: false
-
-      - name: List download directory
-        run: |
-          echo "Contents of download directory:"
-          ls -la download/ || echo "No download directory found"
+          mkdir -p download
+          if [ -z "${{ github.event.inputs.title }}" ]; then
+            FILENAME="page_$(date +%Y%m%d_%H%M%S).mhtml"
+          else
+            FILENAME="${{ github.event.inputs.title }}.mhtml"
+          fi
           
-      - name: Commit and push download folder to repo
-        if: success()
+          single-file "${{ github.event.inputs.url }}" "download/${FILENAME}"
+          
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # بررسی وجود فایل‌ها
-          if [ -d "download" ] && [ "$(ls -A download 2>/dev/null)" ]; then
-            echo "Files found, committing..."
-            git add download/
-            git commit -m "Add MHTML archive for ${{ github.event.inputs.url }}" || echo "No changes to commit"
-            git push
-            echo "Push completed"
-          else
-            echo "No files to download - check previous step for errors"
-            echo "Current directory contents:"
-            ls -la
-            exit 1
-          fi
+          git add download/
+          git commit -m "Add MHTML for ${{ github.event.inputs.url }}" || echo "No changes"
+          git push
